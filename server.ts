@@ -1,57 +1,16 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import Database from "better-sqlite3";
 import cookieParser from "cookie-parser";
 import { GoogleGenAI } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const db = new Database("database.sqlite");
-
-// Initialize tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS links (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    alias TEXT UNIQUE,
-    target_url TEXT,
-    title TEXT,
-    description TEXT,
-    image_url TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS pages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    alias TEXT UNIQUE,
-    title TEXT,
-    content TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS visits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT, -- 'link' or 'page'
-    target_alias TEXT,
-    ip TEXT,
-    user_agent TEXT,
-    referer TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
-
-// Insert default admin if not exists
-const adminExists = db.prepare("SELECT * FROM users WHERE username = ?").get("admin");
-if (!adminExists) {
-  db.prepare("INSERT INTO users (username, password) VALUES (?, ?)").run("admin", "admin123");
-}
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_ANON_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function startServer() {
   const app = express();
@@ -72,17 +31,26 @@ async function startServer() {
   // --- Public Routes ---
 
   // Link Redirection
-  app.get("/l/:alias", (req, res) => {
+  app.get("/l/:alias", async (req, res) => {
     const { alias } = req.params;
-    const link: any = db.prepare("SELECT * FROM links WHERE alias = ?").get(alias);
+    const { data: link, error } = await supabase
+      .from("links")
+      .select("*")
+      .eq("alias", alias)
+      .single();
 
-    if (!link) {
+    if (error || !link) {
       return res.status(404).send("Link not found");
     }
 
-    // Log visit
-    db.prepare("INSERT INTO visits (type, target_alias, ip, user_agent, referer) VALUES (?, ?, ?, ?, ?)")
-      .run("link", alias, req.ip, req.get("user-agent"), req.get("referer"));
+    // Log visit (async, don't wait)
+    supabase.from("visits").insert({
+      type: "link",
+      target_alias: alias,
+      ip: req.ip,
+      user_agent: req.get("user-agent"),
+      referer: req.get("referer")
+    }).then();
 
     // Check if it's a bot for metadata
     const ua = req.get("user-agent") || "";
@@ -111,27 +79,42 @@ async function startServer() {
   });
 
   // Custom Page Serving
-  app.get("/p/:alias", (req, res) => {
+  app.get("/p/:alias", async (req, res) => {
     const { alias } = req.params;
-    const page: any = db.prepare("SELECT * FROM pages WHERE alias = ?").get(alias);
+    const { data: page, error } = await supabase
+      .from("pages")
+      .select("*")
+      .eq("alias", alias)
+      .single();
 
-    if (!page) {
+    if (error || !page) {
       return res.status(404).send("Page not found");
     }
 
-    // Log visit
-    db.prepare("INSERT INTO visits (type, target_alias, ip, user_agent, referer) VALUES (?, ?, ?, ?, ?)")
-      .run("page", alias, req.ip, req.get("user-agent"), req.get("referer"));
+    // Log visit (async)
+    supabase.from("visits").insert({
+      type: "page",
+      target_alias: alias,
+      ip: req.ip,
+      user_agent: req.get("user-agent"),
+      referer: req.get("referer")
+    }).then();
 
     res.send(page.content);
   });
 
   // --- Admin API Routes ---
 
-  app.post("/api/admin/login", (req, res) => {
+  app.post("/api/admin/login", async (req, res) => {
     const { username, password } = req.body;
-    const user: any = db.prepare("SELECT * FROM users WHERE username = ? AND password = ?").get(username, password);
-    if (user) {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("username", username)
+      .eq("password", password)
+      .single();
+
+    if (user && !error) {
       res.cookie("session", "admin-session-id", { httpOnly: true, sameSite: 'none', secure: true });
       res.json({ success: true });
     } else {
@@ -153,73 +136,66 @@ async function startServer() {
   });
 
   // Stats
-  app.get("/api/admin/stats", authMiddleware, (req, res) => {
-    const totalLinks = db.prepare("SELECT COUNT(*) as count FROM links").get() as any;
-    const totalPages = db.prepare("SELECT COUNT(*) as count FROM pages").get() as any;
-    const totalVisits = db.prepare("SELECT COUNT(*) as count FROM visits").get() as any;
-    const recentVisits = db.prepare("SELECT * FROM visits ORDER BY timestamp DESC LIMIT 50").all();
+  app.get("/api/admin/stats", authMiddleware, async (req, res) => {
+    const { count: totalLinks } = await supabase.from("links").select("*", { count: 'exact', head: true });
+    const { count: totalPages } = await supabase.from("pages").select("*", { count: 'exact', head: true });
+    const { count: totalVisits } = await supabase.from("visits").select("*", { count: 'exact', head: true });
+    const { data: recentVisits } = await supabase.from("visits").select("*").order("timestamp", { ascending: false }).limit(50);
 
     res.json({
-      totalLinks: totalLinks.count,
-      totalPages: totalPages.count,
-      totalVisits: totalVisits.count,
-      recentVisits
+      totalLinks: totalLinks || 0,
+      totalPages: totalPages || 0,
+      totalVisits: totalVisits || 0,
+      recentVisits: recentVisits || []
     });
   });
 
   // Links CRUD
-  app.get("/api/admin/links", authMiddleware, (req, res) => {
-    const links = db.prepare("SELECT * FROM links ORDER BY created_at DESC").all();
-    res.json(links);
+  app.get("/api/admin/links", authMiddleware, async (req, res) => {
+    const { data: links } = await supabase.from("links").select("*").order("created_at", { ascending: false });
+    res.json(links || []);
   });
 
-  app.post("/api/admin/links", authMiddleware, (req, res) => {
+  app.post("/api/admin/links", authMiddleware, async (req, res) => {
     const { alias, target_url, title, description, image_url } = req.body;
-    try {
-      db.prepare("INSERT INTO links (alias, target_url, title, description, image_url) VALUES (?, ?, ?, ?, ?)")
-        .run(alias, target_url, title, description, image_url);
+    const { error } = await supabase.from("links").insert({ alias, target_url, title, description, image_url });
+    if (error) {
+      res.status(400).json({ error: error.message });
+    } else {
       res.json({ success: true });
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
     }
   });
 
-  app.delete("/api/admin/links/:id", authMiddleware, (req, res) => {
-    db.prepare("DELETE FROM links WHERE id = ?").run(req.params.id);
-    res.json({ success: true });
+  app.delete("/api/admin/links/:id", authMiddleware, async (req, res) => {
+    const { error } = await supabase.from("links").delete().eq("id", req.params.id);
+    if (error) res.status(400).json({ error: error.message });
+    else res.json({ success: true });
   });
 
   // Pages CRUD
-  app.get("/api/admin/pages", authMiddleware, (req, res) => {
-    const pages = db.prepare("SELECT * FROM pages ORDER BY created_at DESC").all();
-    res.json(pages);
+  app.get("/api/admin/pages", authMiddleware, async (req, res) => {
+    const { data: pages } = await supabase.from("pages").select("*").order("created_at", { ascending: false });
+    res.json(pages || []);
   });
 
-  app.post("/api/admin/pages", authMiddleware, (req, res) => {
+  app.post("/api/admin/pages", authMiddleware, async (req, res) => {
     const { alias, title, content } = req.body;
-    try {
-      db.prepare("INSERT INTO pages (alias, title, content) VALUES (?, ?, ?)")
-        .run(alias, title, content);
-      res.json({ success: true });
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
+    const { error } = await supabase.from("pages").insert({ alias, title, content });
+    if (error) res.status(400).json({ error: error.message });
+    else res.json({ success: true });
   });
 
-  app.put("/api/admin/pages/:id", authMiddleware, (req, res) => {
+  app.put("/api/admin/pages/:id", authMiddleware, async (req, res) => {
     const { title, content, alias } = req.body;
-    try {
-      db.prepare("UPDATE pages SET title = ?, content = ?, alias = ? WHERE id = ?")
-        .run(title, content, alias, req.params.id);
-      res.json({ success: true });
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
+    const { error } = await supabase.from("pages").update({ title, content, alias }).eq("id", req.params.id);
+    if (error) res.status(400).json({ error: error.message });
+    else res.json({ success: true });
   });
 
-  app.delete("/api/admin/pages/:id", authMiddleware, (req, res) => {
-    db.prepare("DELETE FROM pages WHERE id = ?").run(req.params.id);
-    res.json({ success: true });
+  app.delete("/api/admin/pages/:id", authMiddleware, async (req, res) => {
+    const { error } = await supabase.from("pages").delete().eq("id", req.params.id);
+    if (error) res.status(400).json({ error: error.message });
+    else res.json({ success: true });
   });
 
   // AI Generation
