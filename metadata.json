@@ -1,0 +1,5 @@
+{
+  "name": "LinkGen & PageBuilder AI",
+  "description": "Générateur de liens courts avec métadonnées personnalisées et créateur de pages assisté par IA.",
+  "requestFramePermissions": []
+}
