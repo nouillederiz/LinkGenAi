@@ -107,18 +107,34 @@ async function startServer() {
 
   app.post("/api/admin/login", async (req, res) => {
     const { username, password } = req.body;
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("username", username)
-      .eq("password", password)
-      .single();
+    
+    if (!supabaseUrl || !supabaseKey) {
+      console.error("Supabase environment variables are missing!");
+      return res.status(500).json({ error: "Configuration serveur manquante (Variables Supabase)" });
+    }
 
-    if (user && !error) {
-      res.cookie("session", "admin-session-id", { httpOnly: true, sameSite: 'none', secure: true });
-      res.json({ success: true });
-    } else {
-      res.status(401).json({ error: "Invalid credentials" });
+    try {
+      const { data: user, error } = await supabase
+        .from("users")
+        .select("*")
+        .eq("username", username)
+        .eq("password", password)
+        .single();
+
+      if (error) {
+        console.error("Supabase Login Error:", error.message);
+        return res.status(401).json({ error: "Identifiants invalides ou erreur base de données" });
+      }
+
+      if (user) {
+        res.cookie("session", "admin-session-id", { httpOnly: true, sameSite: 'none', secure: true });
+        res.json({ success: true });
+      } else {
+        res.status(401).json({ error: "Utilisateur non trouvé" });
+      }
+    } catch (err: any) {
+      console.error("Login unexpected error:", err);
+      res.status(500).json({ error: "Erreur interne du serveur" });
     }
   });
 
