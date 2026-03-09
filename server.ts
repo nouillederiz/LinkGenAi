@@ -10,6 +10,12 @@ dotenv.config();
 
 const supabaseUrl = process.env.SUPABASE_URL || "";
 const supabaseKey = process.env.SUPABASE_ANON_KEY || "";
+
+console.log("--- Configuration Supabase ---");
+console.log("URL:", supabaseUrl ? `${supabaseUrl.substring(0, 15)}...` : "NON DÉFINIE");
+console.log("KEY:", supabaseKey ? "DÉFINIE (masquée)" : "NON DÉFINIE");
+console.log("------------------------------");
+
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function startServer() {
@@ -108,34 +114,57 @@ async function startServer() {
   app.post("/api/admin/login", async (req, res) => {
     const { username, password } = req.body;
     
+    console.log(`Tentative de connexion pour: ${username}`);
+
     if (!supabaseUrl || !supabaseKey) {
-      console.error("Supabase environment variables are missing!");
-      return res.status(500).json({ error: "Configuration serveur manquante (Variables Supabase)" });
+      console.error("ERREUR: Variables d'environnement Supabase manquantes !");
+      return res.status(500).json({ 
+        error: "Configuration serveur incomplète", 
+        details: "Les variables SUPABASE_URL ou SUPABASE_ANON_KEY ne sont pas définies." 
+      });
     }
 
     try {
+      // On cherche l'utilisateur
       const { data: user, error } = await supabase
         .from("users")
         .select("*")
         .eq("username", username)
         .eq("password", password)
-        .single();
+        .maybeSingle(); // maybeSingle est plus sûr que single() si on veut gérer l'absence proprement
 
       if (error) {
-        console.error("Supabase Login Error:", error.message);
-        return res.status(401).json({ error: "Identifiants invalides ou erreur base de données" });
+        console.error("Erreur Supabase lors de la requête:", error.message);
+        return res.status(500).json({ error: "Erreur de communication avec la base de données", details: error.message });
       }
 
       if (user) {
-        res.cookie("session", "admin-session-id", { httpOnly: true, sameSite: 'none', secure: true });
-        res.json({ success: true });
+        console.log("Connexion réussie pour l'admin");
+        res.cookie("session", "admin-session-id", { 
+          httpOnly: true, 
+          sameSite: 'none', 
+          secure: true,
+          maxAge: 24 * 60 * 60 * 1000 // 24 heures
+        });
+        return res.json({ success: true });
       } else {
-        res.status(401).json({ error: "Utilisateur non trouvé" });
+        console.warn("Identifiants incorrects ou utilisateur inexistant");
+        return res.status(401).json({ error: "Identifiants invalides" });
       }
     } catch (err: any) {
-      console.error("Login unexpected error:", err);
-      res.status(500).json({ error: "Erreur interne du serveur" });
+      console.error("Erreur inattendue lors du login:", err);
+      return res.status(500).json({ error: "Erreur interne critique", details: err.message });
     }
+  });
+
+  // Route de diagnostic pour vérifier la config Supabase
+  app.get("/api/admin/debug-config", (req, res) => {
+    res.json({
+      hasUrl: !!supabaseUrl,
+      hasKey: !!supabaseKey,
+      urlStart: supabaseUrl ? supabaseUrl.substring(0, 15) + "..." : "manquant",
+      env: process.env.NODE_ENV
+    });
   });
 
   app.post("/api/admin/logout", (req, res) => {

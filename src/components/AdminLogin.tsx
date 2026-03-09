@@ -17,10 +17,12 @@ export default function AdminLogin({ onLogin }: AdminLoginProps) {
     setLoading(true);
     setError('');
     try {
-      await axios.post('/api/admin/login', { username, password });
+      const res = await axios.post('/api/admin/login', { username, password });
       onLogin();
     } catch (err: any) {
-      setError('Identifiants invalides');
+      const serverError = err.response?.data?.error;
+      const serverDetails = err.response?.data?.details;
+      setError(serverDetails ? `${serverError}: ${serverDetails}` : (serverError || 'Erreur de connexion'));
     } finally {
       setLoading(false);
     }
